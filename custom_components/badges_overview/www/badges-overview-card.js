@@ -48,6 +48,8 @@ class BadgesOverviewApp extends HTMLElement {
     this._editName = "";
     this._editIcon = "";
     this._editShowName = true;
+    this._editGroupExistingKeys = new Set();
+    this._editGroupNewTargets = new Set();
   }
 
   // ---- Entrée "carte" classique -------------------------------------
@@ -340,6 +342,22 @@ class BadgesOverviewApp extends HTMLElement {
   }
 
   // ---- Édition d'un badge existant --------------------------------
+  _findOccurrencesForEntity(entityId) {
+    const occurrences = [];
+    (this._dashboards || []).forEach((dash, dashIndex) => {
+      const views = (dash.config && dash.config.views) || [];
+      views.forEach((view, viewIndex) => {
+        (view.badges || []).forEach((raw, badgeIndex) => {
+          const b = this._normalizeBadge(raw);
+          if (b && b.entity === entityId) {
+            occurrences.push({ dashIndex, viewIndex, badgeIndex });
+          }
+        });
+      });
+    });
+    return occurrences;
+  }
+
   _startEdit(dashIndex, viewIndex, badgeIndex) {
     const view = this._dashboards[dashIndex].config.views[viewIndex];
     const current = this._normalizeBadge(view.badges[badgeIndex]) || {};
@@ -348,6 +366,10 @@ class BadgesOverviewApp extends HTMLElement {
     this._editName = current.name || "";
     this._editIcon = current.icon || "";
     this._editShowName = current.show_name !== undefined ? !!current.show_name : Boolean(current.name);
+    this._editGroupExistingKeys = new Set(
+      this._findOccurrencesForEntity(current.entity).map((o) => `${o.dashIndex}::${o.viewIndex}`)
+    );
+    this._editGroupNewTargets = new Set();
     this._buildStructure();
   }
 
@@ -373,12 +395,41 @@ class BadgesOverviewApp extends HTMLElement {
     newConfig.show_name = !!this._editShowName;
     view.badges[badgeIndex] = newConfig;
     this._pending.add(dashIndex);
+
+    // Ajout aux nouvelles vues cochées dans le panneau
+    const badgeToAdd = { type: "entity", entity: this._editEntity };
+    if (this._editName && this._editName.trim()) badgeToAdd.name = this._editName.trim();
+    if (this._editIcon && this._editIcon.trim()) badgeToAdd.icon = this._editIcon.trim();
+    badgeToAdd.show_name = !!this._editShowName;
+
+    this._editGroupNewTargets.forEach((key) => {
+      const [tDashIndexStr, tViewIndexStr] = key.split("::");
+      const tDashIndex = parseInt(tDashIndexStr, 10);
+      const tViewIndex = parseInt(tViewIndexStr, 10);
+      const tDash = this._dashboards[tDashIndex];
+      if (!tDash || !tDash.config || !tDash.config.views) return;
+      const tView = tDash.config.views[tViewIndex];
+      if (!tView) return;
+      if (!tView.badges) tView.badges = [];
+      const already = tView.badges.some(
+        (b) => (typeof b === "string" ? b : b.entity) === this._editEntity
+      );
+      if (!already) {
+        tView.badges.push({ ...badgeToAdd });
+        this._pending.add(tDashIndex);
+      }
+    });
+
     this._editing = null;
+    this._editGroupExistingKeys = new Set();
+    this._editGroupNewTargets = new Set();
     this._buildStructure();
   }
 
   _cancelEdit() {
     this._editing = null;
+    this._editGroupExistingKeys = new Set();
+    this._editGroupNewTargets = new Set();
     this._buildStructure();
   }
 
@@ -390,6 +441,10 @@ class BadgesOverviewApp extends HTMLElement {
     this._editIcon = currentConfig.icon || "";
     this._editShowName =
       currentConfig.show_name !== undefined ? !!currentConfig.show_name : Boolean(currentConfig.name);
+    this._editGroupExistingKeys = new Set(
+      occurrences.map((o) => `${o.dashIndex}::${o.viewIndex}`)
+    );
+    this._editGroupNewTargets = new Set();
     this._buildStructure();
   }
 
@@ -421,12 +476,41 @@ class BadgesOverviewApp extends HTMLElement {
       view.badges[occ.badgeIndex] = newConfig;
       this._pending.add(occ.dashIndex);
     });
+
+    // Ajout aux nouvelles vues cochées dans le panneau
+    const badgeToAdd = { type: "entity", entity: this._editEntity };
+    if (this._editName && this._editName.trim()) badgeToAdd.name = this._editName.trim();
+    if (this._editIcon && this._editIcon.trim()) badgeToAdd.icon = this._editIcon.trim();
+    badgeToAdd.show_name = !!this._editShowName;
+
+    this._editGroupNewTargets.forEach((key) => {
+      const [dashIndexStr, viewIndexStr] = key.split("::");
+      const dashIndex = parseInt(dashIndexStr, 10);
+      const viewIndex = parseInt(viewIndexStr, 10);
+      const dash = this._dashboards[dashIndex];
+      if (!dash || !dash.config || !dash.config.views) return;
+      const view = dash.config.views[viewIndex];
+      if (!view) return;
+      if (!view.badges) view.badges = [];
+      const already = view.badges.some(
+        (b) => (typeof b === "string" ? b : b.entity) === this._editEntity
+      );
+      if (!already) {
+        view.badges.push({ ...badgeToAdd });
+        this._pending.add(dashIndex);
+      }
+    });
+
     this._editingGroup = null;
+    this._editGroupExistingKeys = new Set();
+    this._editGroupNewTargets = new Set();
     this._buildStructure();
   }
 
   _cancelEditGroup() {
     this._editingGroup = null;
+    this._editGroupExistingKeys = new Set();
+    this._editGroupNewTargets = new Set();
     this._buildStructure();
   }
 
@@ -932,6 +1016,101 @@ class BadgesOverviewApp extends HTMLElement {
   }
 
   // ---- Panneau de création globale --------------------------------
+  // Liste à cocher des vues éditables, groupées par tableau de bord, avec
+  // case "tout sélectionner" par dashboard. Utilisée par la création ET
+  // par l'ajout d'un badge existant à d'autres vues. `alreadyKeys` (Set)
+  // marque les vues où le badge est déjà présent : cochées, grisées, non
+  // décochables depuis ce panneau (le retrait se fait via le "×" dédié).
+  _buildTargetsChecklist(selectedSet, options = {}) {
+    const alreadyKeys = options.alreadyKeys || new Set();
+    const container = document.createElement("div");
+    container.className = "targets-list";
+    let anyView = false;
+
+    (this._dashboards || []).forEach((dash, dashIndex) => {
+      if (!this._isEditable(dashIndex)) return;
+      const views = (dash.config && dash.config.views) || [];
+      if (!views.length) return;
+
+      const dashGroup = document.createElement("div");
+      dashGroup.className = "target-dash-group";
+
+      const dashHeaderRow = document.createElement("div");
+      dashHeaderRow.className = "target-dash-header";
+
+      const addableKeys = views
+        .map((v, vi) => `${dashIndex}::${vi}`)
+        .filter((k) => !alreadyKeys.has(k));
+
+      if (addableKeys.length) {
+        const selectAll = document.createElement("input");
+        selectAll.type = "checkbox";
+        selectAll.checked = addableKeys.every((k) => selectedSet.has(k));
+        selectAll.addEventListener("change", () => {
+          addableKeys.forEach((k) => {
+            if (selectAll.checked) selectedSet.add(k);
+            else selectedSet.delete(k);
+          });
+          this._buildStructure();
+        });
+        dashHeaderRow.appendChild(selectAll);
+      } else {
+        const spacer = document.createElement("span");
+        spacer.className = "target-spacer";
+        dashHeaderRow.appendChild(spacer);
+      }
+
+      const dashLabel = document.createElement("span");
+      dashLabel.className = "target-dash-label";
+      dashLabel.textContent = dash.meta.title || dash.meta.url_path || "Sans titre";
+      dashHeaderRow.appendChild(dashLabel);
+
+      dashGroup.appendChild(dashHeaderRow);
+
+      views.forEach((view, viewIndex) => {
+        anyView = true;
+        const key = `${dashIndex}::${viewIndex}`;
+        const row = document.createElement("label");
+        row.className = "target-row";
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+
+        if (alreadyKeys.has(key)) {
+          cb.checked = true;
+          cb.disabled = true;
+          row.classList.add("already-present");
+        } else {
+          cb.checked = selectedSet.has(key);
+          cb.addEventListener("change", () => {
+            if (cb.checked) selectedSet.add(key);
+            else selectedSet.delete(key);
+          });
+        }
+        row.appendChild(cb);
+
+        const span = document.createElement("span");
+        span.textContent =
+          (view.title || view.path || `Vue ${viewIndex + 1}`) +
+          (alreadyKeys.has(key) ? " (déjà présent)" : "");
+        row.appendChild(span);
+
+        dashGroup.appendChild(row);
+      });
+
+      container.appendChild(dashGroup);
+    });
+
+    if (!anyView) {
+      const none = document.createElement("div");
+      none.className = "muted";
+      none.textContent =
+        "Aucune vue éditable trouvée (tous tes tableaux de bord sont peut-être en mode YAML, ou aucune donnée n'est chargée).";
+      container.appendChild(none);
+    }
+
+    return container;
+  }
+
   _buildCreatePanel() {
     const overlay = document.createElement("div");
     overlay.className = "overlay";
@@ -994,71 +1173,7 @@ class BadgesOverviewApp extends HTMLElement {
     targetsLabel.textContent = "Affecter aux vues :";
     modal.appendChild(targetsLabel);
 
-    const targetsList = document.createElement("div");
-    targetsList.className = "targets-list";
-
-    let anyEditableView = false;
-
-    (this._dashboards || []).forEach((dash, dashIndex) => {
-      if (!this._isEditable(dashIndex)) return;
-      const views = (dash.config && dash.config.views) || [];
-      if (!views.length) return;
-
-      const dashGroup = document.createElement("div");
-      dashGroup.className = "target-dash-group";
-
-      const dashHeaderRow = document.createElement("div");
-      dashHeaderRow.className = "target-dash-header";
-
-      const selectAll = document.createElement("input");
-      selectAll.type = "checkbox";
-      const allKeysForDash = views.map((v, vi) => `${dashIndex}::${vi}`);
-      selectAll.checked = allKeysForDash.every((k) => this._createTargets.has(k));
-      selectAll.addEventListener("change", () => {
-        allKeysForDash.forEach((k) => {
-          if (selectAll.checked) this._createTargets.add(k);
-          else this._createTargets.delete(k);
-        });
-        this._buildStructure();
-      });
-      dashHeaderRow.appendChild(selectAll);
-
-      const dashLabel = document.createElement("span");
-      dashLabel.className = "target-dash-label";
-      dashLabel.textContent = dash.meta.title || dash.meta.url_path || "Sans titre";
-      dashHeaderRow.appendChild(dashLabel);
-
-      dashGroup.appendChild(dashHeaderRow);
-
-      views.forEach((view, viewIndex) => {
-        anyEditableView = true;
-        const key = `${dashIndex}::${viewIndex}`;
-        const row = document.createElement("label");
-        row.className = "target-row";
-        const cb = document.createElement("input");
-        cb.type = "checkbox";
-        cb.checked = this._createTargets.has(key);
-        cb.addEventListener("change", () => {
-          if (cb.checked) this._createTargets.add(key);
-          else this._createTargets.delete(key);
-        });
-        row.appendChild(cb);
-        const span = document.createElement("span");
-        span.textContent = view.title || view.path || `Vue ${viewIndex + 1}`;
-        row.appendChild(span);
-        dashGroup.appendChild(row);
-      });
-
-      targetsList.appendChild(dashGroup);
-    });
-
-    if (!anyEditableView) {
-      const none = document.createElement("div");
-      none.className = "muted";
-      none.textContent =
-        "Aucune vue éditable trouvée (tous tes tableaux de bord sont peut-être en mode YAML, ou aucune donnée n'est chargée).";
-      targetsList.appendChild(none);
-    }
+    const targetsList = this._buildTargetsChecklist(this._createTargets);
 
     modal.appendChild(targetsList);
 
@@ -1141,6 +1256,16 @@ class BadgesOverviewApp extends HTMLElement {
         this._editShowName = v;
       },
     });
+
+    const addLabel = document.createElement("div");
+    addLabel.className = "field-label";
+    addLabel.textContent = "Ajouter aussi à d'autres vues :";
+    modal.appendChild(addLabel);
+    modal.appendChild(
+      this._buildTargetsChecklist(this._editGroupNewTargets, {
+        alreadyKeys: this._editGroupExistingKeys,
+      })
+    );
 
     const actions = document.createElement("div");
     actions.className = "modal-actions";
@@ -1231,6 +1356,16 @@ class BadgesOverviewApp extends HTMLElement {
         this._editShowName = v;
       },
     });
+
+    const addLabel = document.createElement("div");
+    addLabel.className = "field-label";
+    addLabel.textContent = "Ajouter aussi à d'autres vues :";
+    modal.appendChild(addLabel);
+    modal.appendChild(
+      this._buildTargetsChecklist(this._editGroupNewTargets, {
+        alreadyKeys: this._editGroupExistingKeys,
+      })
+    );
 
     const actions = document.createElement("div");
     actions.className = "modal-actions";
@@ -1645,6 +1780,8 @@ class BadgesOverviewApp extends HTMLElement {
       .target-dash-group { margin-bottom: 10px; }
       .target-dash-header { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 13px; margin-bottom: 4px; }
       .target-row { display: flex; align-items: center; gap: 6px; font-size: 13px; padding: 2px 0 2px 18px; cursor: pointer; }
+      .target-row.already-present { opacity: 0.55; cursor: default; }
+      .target-spacer { display: inline-block; width: 13px; }
       .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
     `;
   }
