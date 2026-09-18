@@ -1,7 +1,7 @@
 {
   "domain": "badges_overview",
   "name": "Badges Overview",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "documentation": "https://github.com/TON-PSEUDO/badges-overview-card",
   "issue_tracker": "https://github.com/TON-PSEUDO/badges-overview-card/issues",
   "codeowners": ["@TON-PSEUDO"],
