@@ -1,0 +1,13 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Install Badges Overview",
+        "description": "Adds a \"Badges\" panel to the sidebar, showing and letting you manage all badges from every dashboard. No fields to fill in, just click Submit."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Badges Overview is already installed: only one instance is needed."
+    }
+  }
+}
